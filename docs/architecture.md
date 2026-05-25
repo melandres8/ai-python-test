@@ -1,56 +1,56 @@
-# AI Intelligent Notification Service Architecture
+# Arquitectura del Servicio Inteligente de Notificaciones con IA
 
-## Executive summary
+## Resumen ejecutivo
 
-This solution implements the required FastAPI service on port 5000 for natural-language notification intents. It accepts user text, asks the mock AI provider for structured extraction, applies guardrails for noisy LLM output, falls back to deterministic extraction when the AI refuses or returns unusable data, and sends valid notifications to the provider.
+Esta solución implementa el servicio FastAPI requerido en el puerto 5000 para intenciones de notificación en lenguaje natural. Acepta texto del usuario, consulta al proveedor de IA simulado para extracción estructurada, aplica salvaguardas ante respuestas ruidosas del LLM, recurre a extracción determinista cuando la IA rechaza o devuelve datos inutilizables, y envía notificaciones válidas al proveedor.
 
-## Component map
+## Mapa de componentes
 
 ```mermaid
 flowchart LR
-    Client[Client / k6] -->|POST /v1/requests user_input| API[FastAPI routes app/main.py]
-    Client -->|POST /v1/requests/{id}/process| API
-    Client -->|GET /v1/requests/{id}| API
-    API --> Models[models.py request/status schemas]
-    API --> Store[(store.py in-memory request store)]
-    API --> Worker[Background processing task]
-    Worker --> Extractor[ai_extractor.py prompt + guardrails + fallback]
+    Client[Cliente / k6] -->|"POST /v1/requests user_input"| API[Rutas FastAPI app/main.py]
+    Client -->|"POST /v1/requests/{id}/process"| API
+    Client -->|"GET /v1/requests/{id}"| API
+    API --> Models[models.py esquemas de solicitud/estado]
+    API --> Store[(store.py almacén en memoria)]
+    API --> Worker[Tarea de procesamiento en segundo plano]
+    Worker --> Extractor[ai_extractor.py prompt + salvaguardas + fallback]
     Extractor -->|X-API-Key| AIProvider[AI Extract :3001]
-    Extractor --> ProviderClient[provider_client.py notify retry + concurrency guard]
+    Extractor --> ProviderClient[provider_client.py notificar con reintentos + control de concurrencia]
     ProviderClient -->|X-API-Key| NotificationProvider[Notify :3001]
 ```
 
-## Runtime/data flow
+## Flujo de ejecución/datos
 
-1. `POST /v1/requests` validates `{user_input}` and returns `201 {id}`.
-2. `POST /v1/requests/{id}/process` marks a queued item as `processing` and schedules background extraction/delivery. The operation is idempotent: repeated calls while already `processing`, `sent`, or `failed` return the current state without enqueueing duplicate work.
-3. The worker calls `/v1/ai/extract` using a strict system prompt that asks for compact JSON with `to`, `message`, and `type`.
-4. Guardrails parse common LLM response variants:
-   - Markdown fenced JSON.
-   - Embedded JSON inside prose.
-   - Capitalized or aliased keys (`Recipient/body/channel`, `destination/text/method`).
-   - Single quotes or unquoted keys.
-   - Truncated JSON with trailing ellipsis where recoverable.
-5. If AI output is not usable, the service uses deterministic extraction from the original prompt for email/phone and message text.
-6. Valid notifications are sent to `/v1/notify` with bounded timeout, concurrency limits, trace id, and retries for transient failures.
-7. `GET /v1/requests/{id}` returns `queued`, `processing`, `sent`, or `failed`.
+1. `POST /v1/requests` valida `{user_input}` y devuelve `201 {id}`.
+2. `POST /v1/requests/{id}/process` marca un elemento en cola como `processing` y programa la extracción/entrega en segundo plano. La operación es idempotente: llamadas repetidas mientras ya está en `processing`, `sent` o `failed` devuelven el estado actual sin encolar trabajo duplicado.
+3. El worker llama a `/v1/ai/extract` usando un prompt de sistema estricto que solicita JSON compacto con `to`, `message` y `type`.
+4. Las salvaguardas analizan variantes comunes de respuesta del LLM:
+   - JSON dentro de bloques Markdown con cercas de código.
+   - JSON incrustado dentro de prosa.
+   - Claves en mayúsculas o con alias (`Recipient/body/channel`, `destination/text/method`).
+   - Comillas simples o claves sin comillas.
+   - JSON truncado con puntos suspensivos al final, cuando es recuperable.
+5. Si la salida de la IA no es utilizable, el servicio recurre a la extracción determinista del prompt original para obtener email/teléfono y texto del mensaje.
+6. Las notificaciones válidas se envían a `/v1/notify` con tiempo de espera acotado, límites de concurrencia, id de traza y reintentos ante fallos transitorios.
+7. `GET /v1/requests/{id}` devuelve `queued`, `processing`, `sent` o `failed`.
 
-## Operational notes
+## Notas operativas
 
-- Storage is in-memory because the challenge defines no persistent database.
-- Provider URL/API key/timeouts/concurrency are environment-configurable.
-- The status endpoint remains valid during the AI latency window; long extractions report `processing` instead of blocking client requests.
+- El almacenamiento es en memoria porque el desafío no define ninguna base de datos persistente.
+- La URL del proveedor, la clave API, los tiempos de espera y la concurrencia son configurables por entorno.
+- El endpoint de estado permanece válido durante la ventana de latencia de la IA; las extracciones prolongadas reportan `processing` en lugar de bloquear las solicitudes del cliente.
 
-## Production trade-offs
+## Compromisos para producción
 
-- **Persistence:** in-memory state is adequate for the challenge evaluator, but production should persist request state and extracted notification payloads in Postgres/Redis for restart safety and auditability.
-- **Durable processing:** FastAPI `BackgroundTasks` keeps the implementation small. A production system should use a durable queue/worker to survive crashes, support dead-lettering, and isolate slow AI/provider calls from API workers.
-- **Idempotency:** `/process` is idempotent at the application state level. Production should enforce the queued-to-processing transition atomically in the datastore and consider idempotency keys for client retries.
-- **AI extraction:** guardrails handle common mock-LLM noise. Production should prefer schema-constrained model output where possible, retain parser tests for adversarial examples, and log structured extraction-failure reasons.
-- **Secrets:** the README-provided API key is used as a default for the challenge. Production secrets should be environment-only and managed by the deployment platform.
-- **Observability:** production should add structured logs, metrics, tracing, and dashboards for AI latency, extraction failures, notification retries, and provider error rates.
+- **Persistencia:** el estado en memoria es adecuado para el evaluador del desafío, pero en producción se debería persistir el estado de las solicitudes y los payloads de notificación extraídos en Postgres/Redis para garantizar seguridad ante reinicios y trazabilidad.
+- **Procesamiento duradero:** `BackgroundTasks` de FastAPI mantiene la implementación simple. Un sistema en producción debería usar una cola/worker duradero para sobrevivir a caídas, soportar dead-lettering y aislar las llamadas lentas a la IA/proveedor de los workers de la API.
+- **Idempotencia:** `/process` es idempotente a nivel del estado de la aplicación. En producción se debería aplicar la transición de `queued` a `processing` de forma atómica en el almacén de datos y considerar claves de idempotencia para los reintentos del cliente.
+- **Extracción por IA:** las salvaguardas manejan el ruido habitual del LLM simulado. En producción se debería preferir salida del modelo restringida por esquema siempre que sea posible, mantener pruebas del parser con ejemplos adversariales y registrar los motivos de fallo de extracción de forma estructurada.
+- **Secretos:** la clave API proporcionada en el README se usa como valor por defecto para el desafío. En producción, los secretos deben ser exclusivamente de entorno y estar gestionados por la plataforma de despliegue.
+- **Observabilidad:** en producción se deberían añadir logs estructurados, métricas, trazado y dashboards para la latencia de la IA, fallos de extracción, reintentos de notificación y tasas de error del proveedor.
 
-## Verification
+## Verificación
 
 ```bash
 cd app
@@ -61,4 +61,4 @@ pytest -q test_main.py
 python -m compileall -q main.py test_main.py
 ```
 
-A local smoke check can be run by starting `provider/app.py` on port 3001 and `app/main.py` on port 5000, creating an intent, processing it, and polling status until `sent` or `failed`.
+Se puede realizar una comprobación local de humo iniciando `provider/app.py` en el puerto 3001 y `app/main.py` en el puerto 5000, creando una intención, procesándola y consultando el estado hasta obtener `sent` o `failed`.
