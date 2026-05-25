@@ -1,3 +1,5 @@
+import asyncio
+
 from fastapi.testclient import TestClient
 
 import main
@@ -59,3 +61,27 @@ def test_malformed_or_missing_destination_fails_cleanly(monkeypatch):
         request_id = client.post("/v1/requests", json={"user_input": "manda algo sin destino"}).json()["id"]
         client.post(f"/v1/requests/{request_id}/process")
         assert client.get(f"/v1/requests/{request_id}").json()["status"] == "failed"
+
+
+def test_process_is_idempotent_while_request_is_processing():
+    async def scenario():
+        async with main._store_lock:
+            main.requests_store.clear()
+            request_id = "idempotent-ai-request"
+            main.requests_store[request_id] = main.StoredRequest(
+                id=request_id,
+                user_input="Manda un mail a ana@example.com diciendo hola",
+            )
+
+        first_tasks = main.BackgroundTasks()
+        first_response = await main.process_request(request_id, first_tasks)
+
+        second_tasks = main.BackgroundTasks()
+        second_response = await main.process_request(request_id, second_tasks)
+
+        assert first_response == {"id": request_id, "status": main.RequestStatus.processing}
+        assert second_response == {"id": request_id, "status": main.RequestStatus.processing}
+        assert len(first_tasks.tasks) == 1
+        assert len(second_tasks.tasks) == 0
+
+    asyncio.run(scenario())

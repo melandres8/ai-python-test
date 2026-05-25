@@ -99,7 +99,7 @@ async def process_request(request_id: str, background_tasks: BackgroundTasks) ->
         item = requests_store.get(request_id)
         if item is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Request not found")
-        if item.status == RequestStatus.sent:
+        if item.status != RequestStatus.queued:
             return {"id": request_id, "status": item.status}
         item.status = RequestStatus.processing
     background_tasks.add_task(process_intent_request, request_id)
